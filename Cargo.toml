@@ -9,7 +9,6 @@ crate-type = ["cdylib"]
 
 [dependencies]
 near-sdk = "4.0.0-pre.4"
-hex = "0.4.3"
 
 [profile.release]
 codegen-units = 1
