@@ -112,10 +112,10 @@ impl Contract {
 
         let recipient = env::predecessor_account_id();
         let mut account = self.accounts.get(&recipient).unwrap_or_else(|| Account::new());
-        let mut balance = self.calc_interest_for_account(&account);
+        let balance = self.calc_interest_for_account(&account);
         assert!(balance >= amount, "The amount exceed current balance.");
 
-        balance -= amount;
+        // balance -= amount;
         self.total_balance -= amount;
         // account.wnear_deposited_amount = balance;
         account.wnear_deposited_amount -= amount;
