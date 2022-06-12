@@ -155,9 +155,10 @@ impl Contract {
             &_token,
             1,
             GAS_FOR_FT_TRANSFER,
+        ).then(
+            env::log(format!("Withdrawed -> {}", amount).as_bytes()),
+            env::log(format!("Previous balance -> {}", balance).as_bytes()),
         );
-        env::log(format!("Withdrawed -> {}", amount).as_bytes());
-        env::log(format!("Previous balance -> {}", balance).as_bytes());
     }
 
     pub fn get_wnear_balance(&self, account_id: AccountId) -> Balance {
