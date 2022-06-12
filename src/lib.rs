@@ -1,5 +1,5 @@
 use near_sdk::borsh::{self, BorshDeserialize, BorshSerialize};
-use near_sdk::collections::{LookupMap, UnorderedMap};
+use near_sdk::collections::{LookupMap};
 use near_sdk::serde::{Deserialize, Serialize};
 use near_sdk::json_types::{ValidAccountId, U128};
 use near_sdk::{
@@ -11,21 +11,50 @@ const ROI: u128 = 1;
 const DIVISOR: u128 = 1000;
 const NANO: u128 = 1000000000;
 const TIME_DEVISOR: u128 = 1;
-pub const GAS_FOR_FT_TRANSFER: Gas = 50_000_000_000_000;
-
+pub const GAS_FOR_FT_TRANSFER: Gas = 30_000_000_000_000;
+pub const GAS_FOR_FT_REGISTER_TRANSFER: Gas = 50_000_000_000_000;
 
 #[derive(Deserialize, Serialize, BorshDeserialize, BorshSerialize, Debug)]
 #[serde(crate = "near_sdk::serde")]
-pub struct Account {
-    pub wnear_time_tracker: u64,
-    pub wnear_deposited_amount: Balance,
+pub struct TokenData {
+    pub related_token_id: AccountId,
+    pub reward_rate: u128,
 }
 
-impl Account {
+impl TokenData {
+    pub fn new(token_id: AccountId, rate: u128) -> Self{
+        Self {
+            related_token_id: token_id,
+            reward_rate: rate
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize, BorshDeserialize, BorshSerialize, Debug)]
+#[serde(crate = "near_sdk::serde")]
+pub struct DepositDataDetail {
+    pub token_time_tracker: u64,
+    pub token_deposited_amount: Balance,
+}
+
+impl DepositDataDetail {
     pub fn new() -> Self{
         Self {
-            wnear_time_tracker: 0u64,
-            wnear_deposited_amount: 0u128
+            token_time_tracker: 0u64,
+            token_deposited_amount: 0u128
+        }
+    }
+}
+
+#[derive(BorshDeserialize, BorshSerialize)]
+pub struct DepositData {
+    pub tokens: LookupMap<AccountId, DepositDataDetail>,
+}
+
+impl DepositData {
+    pub fn new() -> Self{
+        Self {
+            tokens: LookupMap::new(b"d".to_vec()),
         }
     }
 }
@@ -35,9 +64,9 @@ impl Account {
 pub struct Contract {
     pub owner_id: AccountId,
     pub total_balance: Balance,
-    pub accounts: UnorderedMap<AccountId, Account>,
-    pub token_info: LookupMap<AccountId, u128>,
-    pub reserve_token_info: LookupMap<AccountId, bool>,
+    pub accounts: LookupMap<AccountId, DepositData>,
+    pub token_info: LookupMap<AccountId, TokenData>,
+    pub reserve_token_info: LookupMap<AccountId, TokenData>,
 }
 
 impl Default for Contract {
@@ -72,35 +101,39 @@ impl Contract {
             owner_id: sender,
             total_balance: 0,
             token_info: LookupMap::new(b"t".to_vec()),
-            accounts: UnorderedMap::new(b"a".to_vec()),
+            accounts: LookupMap::new(b"a".to_vec()),
             reserve_token_info: LookupMap::new(b"r".to_vec()),
         };
-        this.token_info.insert(&AccountId::from("wrap.testnet".to_string()), &1u128);
-        this.reserve_token_info.insert(&AccountId::from("reservetoken.testnet".to_string()), &true);
+        let wnear_id = AccountId::from("wrap.testnet".to_string());
+        let wnear_reserve_id = AccountId::from("reservetoken.testnet".to_string());
+        this.token_info.insert(&wnear_id, &TokenData::new(wnear_reserve_id.clone(), 1u128));
+        this.reserve_token_info.insert(&wnear_reserve_id, &TokenData::new(wnear_id.clone(), 1u128));
         this
     }
 
-    pub fn calc_interest_for_account(&self, account: &Account) -> Balance {
-        let timestamp = account.wnear_time_tracker;
+    pub fn calc_interest_for_account(&self, account: &DepositDataDetail) -> Balance {
+        let timestamp = account.token_time_tracker;
         let mut interest = 0u128;
-        if timestamp > 0 {
+        if timestamp > 0 && account.token_deposited_amount > 0 {
             let current_timestamp = env::block_timestamp();
             let diff = (current_timestamp - timestamp) as u128 / (NANO * TIME_DEVISOR);
-
-            let deposited_amount = account.wnear_deposited_amount;
+            let deposited_amount = account.token_deposited_amount;
+            interest = (diff * ROI * deposited_amount / DIVISOR).into();
             env::log(format!("{}", diff).as_bytes());
+            env::log(format!("{}", deposited_amount).as_bytes());
             env::log(format!("{}", diff * ROI * deposited_amount / DIVISOR).as_bytes());
-            interest = (diff * ROI * deposited_amount / DIVISOR + deposited_amount).into();
         }
         interest
     }
 
     fn transfer_checker(&mut self, account_id: &AccountId, token_id: &AccountId, amount: Balance) {
         if self.token_info.contains_key(token_id) == true {
+            env::log(format!("Trying to deposit the token").as_bytes());
             self.deposit_token(account_id, token_id, amount.clone());
         }
         else if self.reserve_token_info.contains_key(token_id) == true {
-            self.withdraw_token(account_id, token_id, amount.clone())
+            env::log(format!("Trying to withdraw the token").as_bytes());
+            self.withdraw_token(account_id, token_id, amount.clone());
         }
         else {
             env::panic(b"This contract is not registered to this saving protocol.");
@@ -109,21 +142,41 @@ impl Contract {
 
     #[allow(unused_variables)]
     fn deposit_token(&mut self, sender: &AccountId, token_id: &AccountId, amount: Balance) {
-        let mut account = self.accounts.get(sender).unwrap_or_else(|| Account::new());
-        let new_balance = self.calc_interest_for_account(&account) + amount;
+        let mut deposit_data: DepositData;
+        let mut deposit_data_detail: DepositDataDetail ;
 
-        account.wnear_time_tracker = env::block_timestamp();
-        account.wnear_deposited_amount = new_balance;
-        self.accounts.insert(sender, &account);
-        self.total_balance += amount;
+        if self.accounts.contains_key(sender) {
+            deposit_data = self.accounts.get(sender).unwrap();
+        }
+        else {
+            deposit_data = DepositData::new();
+        }
 
-        let _token = AccountId::from("reservetoken.testnet".to_string());
+        if deposit_data.tokens.contains_key(token_id) {
+            deposit_data_detail = deposit_data.tokens.get(token_id).unwrap();
+        }
+        else {
+            deposit_data_detail = DepositDataDetail::new();
+        }
+
+        
+        let interest = self.calc_interest_for_account(&deposit_data_detail);
+        let new_balance = deposit_data_detail.token_deposited_amount + interest + amount;
+
+        deposit_data_detail.token_time_tracker = env::block_timestamp();
+        deposit_data_detail.token_deposited_amount = new_balance;
+        deposit_data.tokens.insert(token_id, &deposit_data_detail);
+        self.accounts.insert(sender, &deposit_data);
+        // self.total_balance += amount;
+
+        let _token_info: TokenData = self.token_info.get(token_id).unwrap();
+        let _reserve_token_id = _token_info.related_token_id;
         ext_reserve_token::check_and_transfer(
             sender.to_string(),
-            amount.into(),
-            &_token,
+            (amount + interest).into(),
+            &_reserve_token_id,
             1,
-            GAS_FOR_FT_TRANSFER,
+            GAS_FOR_FT_REGISTER_TRANSFER,
         );
     }
 
@@ -131,40 +184,54 @@ impl Contract {
     fn withdraw_token(&mut self, sender: &AccountId, token_id: &AccountId, amount: Balance) {
         let amount: Balance = amount.into();
         assert!(amount > 0u128, "The amount must be greater than zero.");
-        assert!(self.total_balance >= amount, "Insufficient balance.");
+        // assert!(self.total_balance >= amount, "Insufficient balance.");
 
-        let mut account = self.accounts.get(sender).unwrap_or_else(|| Account::new());
-        let mut balance = self.calc_interest_for_account(&account);
+        let _token_info: TokenData = self.reserve_token_info.get(token_id).unwrap();
+        let _reserve_token_id = _token_info.related_token_id;
+        let mut deposit_data = self.accounts.get(sender).unwrap();
+        let mut deposit_data_detail = deposit_data.tokens.get(&_reserve_token_id).unwrap();
+
+        let interest = self.calc_interest_for_account(&deposit_data_detail);
+        let mut balance = deposit_data_detail.token_deposited_amount + interest;
         assert!(balance >= amount, "The amount exceed current balance.");
 
         balance -= amount;
-        account.wnear_deposited_amount = balance;
-        account.wnear_time_tracker = env::block_timestamp();
-        
-        self.total_balance -= amount;
-        if account.wnear_deposited_amount == 0u128 {
-            account.wnear_time_tracker = 0u64;
+        deposit_data_detail.token_deposited_amount = balance;
+        deposit_data_detail.token_time_tracker = env::block_timestamp();
+        if deposit_data_detail.token_deposited_amount == 0u128 {
+            deposit_data_detail.token_time_tracker = 0u64;
         }
-        self.accounts.insert(sender, &account);
+        deposit_data.tokens.insert(&_reserve_token_id, &deposit_data_detail);
+        // self.total_balance -= amount;
+        self.accounts.insert(sender, &deposit_data);
 
-        let _token = AccountId::from("wrap.testnet".to_string());
+        if interest >= amount {
+            ext_ft::ft_transfer(
+                sender.to_string(),
+                (interest - amount).into(),
+                Some("Reward transfer".to_string()),
+                token_id,
+                1,
+                GAS_FOR_FT_TRANSFER,
+            );
+        }
+
         ext_ft::ft_transfer(
             sender.to_string(),
             amount.into(),
             Some("WNear withdraw".to_string()),
-            &_token,
+            &_reserve_token_id,
             1,
             GAS_FOR_FT_TRANSFER,
-        ).then(
-            env::log(format!("Withdrawed -> {}", amount).as_bytes()),
-            env::log(format!("Previous balance -> {}", balance).as_bytes()),
         );
+        env::log(format!("Withdrawed -> {}", amount).as_bytes());
+        env::log(format!("Previous balance -> {}", balance).as_bytes());
     }
 
-    pub fn get_wnear_balance(&self, account_id: AccountId) -> Balance {
-        let account = self.accounts.get(&account_id).unwrap_or_else(|| Account::new());
-        let balance = self.calc_interest_for_account(&account);
-        balance
+    pub fn get_deposit_balance(&self, account_id: AccountId, token_id: AccountId) -> Balance {
+        let deposit_data = self.accounts.get(&account_id).unwrap();
+        let deposit_data_detail = deposit_data.tokens.get(&token_id).unwrap();
+        deposit_data_detail.token_deposited_amount
     }
 }
 
