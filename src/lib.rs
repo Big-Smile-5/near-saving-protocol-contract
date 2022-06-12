@@ -7,10 +7,10 @@ use near_sdk::{
 };
 use near_contract_standards::fungible_token::receiver::FungibleTokenReceiver;
 
-const ROI: u128 = 1;
+const ROI: u128 = 20;
 const DIVISOR: u128 = 1000;
 const NANO: u128 = 1000000000;
-const TIME_DEVISOR: u128 = 1;
+const TIME_DEVISOR: u128 = 60;
 pub const GAS_FOR_FT_TRANSFER: Gas = 30_000_000_000_000;
 pub const GAS_FOR_FT_REGISTER_TRANSFER: Gas = 50_000_000_000_000;
 
@@ -120,8 +120,8 @@ impl Contract {
             let deposited_amount = account.token_deposited_amount;
             interest = (diff * ROI * deposited_amount / DIVISOR).into();
             env::log(format!("{}", diff).as_bytes());
-            env::log(format!("{}", deposited_amount).as_bytes());
-            env::log(format!("{}", diff * ROI * deposited_amount / DIVISOR).as_bytes());
+            env::log(format!("{}", deposited_amount / 1e24 as u128).as_bytes());
+            env::log(format!("{}", interest / 1e24 as u128).as_bytes());
         }
         interest
     }
