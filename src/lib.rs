@@ -35,13 +35,15 @@ impl TokenData {
 pub struct DepositDataDetail {
     pub token_time_tracker: u64,
     pub token_deposited_amount: Balance,
+    pub reward_paid: Balance,
 }
 
 impl DepositDataDetail {
     pub fn new() -> Self{
         Self {
             token_time_tracker: 0u64,
-            token_deposited_amount: 0u128
+            token_deposited_amount: 0u128,
+            reward_paid: 0u128,
         }
     }
 }
@@ -63,7 +65,7 @@ impl DepositData {
 #[derive(BorshDeserialize, BorshSerialize)]
 pub struct Contract {
     pub owner_id: AccountId,
-    pub total_balance: Balance,
+    pub total_balance: LookupMap<AccountId, Balance>,
     pub accounts: LookupMap<AccountId, DepositData>,
     pub token_info: LookupMap<AccountId, TokenData>,
     pub reserve_token_info: LookupMap<AccountId, TokenData>,
@@ -99,7 +101,7 @@ impl Contract {
         let sender = env::predecessor_account_id();
         let mut this = Self {
             owner_id: sender,
-            total_balance: 0,
+            total_balance: LookupMap::new(b"x".to_vec()),
             token_info: LookupMap::new(b"t".to_vec()),
             accounts: LookupMap::new(b"a".to_vec()),
             reserve_token_info: LookupMap::new(b"r".to_vec()),
@@ -109,6 +111,14 @@ impl Contract {
         this.token_info.insert(&wnear_id, &TokenData::new(wnear_reserve_id.clone(), 1u128));
         this.reserve_token_info.insert(&wnear_reserve_id, &TokenData::new(wnear_id.clone(), 1u128));
         this
+    }
+
+    pub fn set_token_address(&mut self, _token_id: AccountId, _reserve_token_id: AccountId, apy: U128) {
+        let sender = env::predecessor_account_id();
+        if sender == self.owner_id {
+            self.token_info.insert(&_token_id, &TokenData::new(_reserve_token_id.clone(), apy.into()));
+            self.reserve_token_info.insert(&_reserve_token_id, &TokenData::new(_token_id.clone(), apy.into()));
+        }
     }
 
     pub fn calc_interest_for_account(&self, account: &DepositDataDetail) -> Balance {
@@ -121,7 +131,7 @@ impl Contract {
             interest = (diff * ROI * deposited_amount / DIVISOR).into();
             env::log(format!("{}", diff).as_bytes());
             env::log(format!("{}", deposited_amount / 1e24 as u128).as_bytes());
-            env::log(format!("{}", interest / 1e24 as u128).as_bytes());
+            env::log(format!("{}", interest).as_bytes());
         }
         interest
     }
@@ -158,16 +168,23 @@ impl Contract {
         else {
             deposit_data_detail = DepositDataDetail::new();
         }
-
-        
         let interest = self.calc_interest_for_account(&deposit_data_detail);
         let new_balance = deposit_data_detail.token_deposited_amount + interest + amount;
 
         deposit_data_detail.token_time_tracker = env::block_timestamp();
         deposit_data_detail.token_deposited_amount = new_balance;
+        deposit_data_detail.reward_paid += interest;
         deposit_data.tokens.insert(token_id, &deposit_data_detail);
         self.accounts.insert(sender, &deposit_data);
-        // self.total_balance += amount;
+
+        let mut _total_balance: Balance;
+        if self.total_balance.contains_key(&token_id) {
+            _total_balance = self.total_balance.get(&token_id).unwrap();
+        } else {
+            _total_balance = 0u128;
+        }
+        _total_balance += amount;
+        self.total_balance.insert(&token_id, &_total_balance);
 
         let _token_info: TokenData = self.token_info.get(token_id).unwrap();
         let _reserve_token_id = _token_info.related_token_id;
@@ -184,12 +201,14 @@ impl Contract {
     fn withdraw_token(&mut self, sender: &AccountId, token_id: &AccountId, amount: Balance) {
         let amount: Balance = amount.into();
         assert!(amount > 0u128, "The amount must be greater than zero.");
-        // assert!(self.total_balance >= amount, "Insufficient balance.");
 
         let _token_info: TokenData = self.reserve_token_info.get(token_id).unwrap();
         let _reserve_token_id = _token_info.related_token_id;
         let mut deposit_data = self.accounts.get(sender).unwrap();
         let mut deposit_data_detail = deposit_data.tokens.get(&_reserve_token_id).unwrap();
+
+        let mut _total_balance = self.total_balance.get(&_reserve_token_id).unwrap();
+        assert!(_total_balance >= amount, "Insufficient balance.");
 
         let interest = self.calc_interest_for_account(&deposit_data_detail);
         let mut balance = deposit_data_detail.token_deposited_amount + interest;
@@ -198,11 +217,13 @@ impl Contract {
         balance -= amount;
         deposit_data_detail.token_deposited_amount = balance;
         deposit_data_detail.token_time_tracker = env::block_timestamp();
+        deposit_data_detail.reward_paid += interest;
         if deposit_data_detail.token_deposited_amount == 0u128 {
             deposit_data_detail.token_time_tracker = 0u64;
         }
         deposit_data.tokens.insert(&_reserve_token_id, &deposit_data_detail);
-        // self.total_balance -= amount;
+        _total_balance -= amount;
+        self.total_balance.insert(&_reserve_token_id, &_total_balance);
         self.accounts.insert(sender, &deposit_data);
 
         if interest >= amount {
@@ -229,9 +250,56 @@ impl Contract {
     }
 
     pub fn get_deposit_balance(&self, account_id: AccountId, token_id: AccountId) -> Balance {
-        let deposit_data = self.accounts.get(&account_id).unwrap();
-        let deposit_data_detail = deposit_data.tokens.get(&token_id).unwrap();
+        let deposit_data: DepositData;
+        let deposit_data_detail: DepositDataDetail ;
+
+        if self.accounts.contains_key(&account_id) {
+            deposit_data = self.accounts.get(&account_id).unwrap();
+        }
+        else {
+            return 0u128.into();
+        }
+
+        if deposit_data.tokens.contains_key(&token_id) {
+            deposit_data_detail = deposit_data.tokens.get(&token_id).unwrap();
+        }
+        else {
+            return 0u128.into();
+        }
+
         deposit_data_detail.token_deposited_amount
+    }
+
+    pub fn get_reward_balance(&self, account_id: AccountId, token_id: AccountId) -> Balance {
+        let deposit_data: DepositData;
+        let deposit_data_detail: DepositDataDetail ;
+
+        if self.accounts.contains_key(&account_id) {
+            deposit_data = self.accounts.get(&account_id).unwrap();
+        }
+        else {
+            return 0u128.into();
+        }
+
+        if deposit_data.tokens.contains_key(&token_id) {
+            deposit_data_detail = deposit_data.tokens.get(&token_id).unwrap();
+        }
+        else {
+            return 0u128.into();
+        }
+
+        deposit_data_detail.reward_paid
+    }
+
+    pub fn get_token_tvl(&self, token_id: AccountId) -> Balance {
+        let mut _total_balance: Balance;
+        if self.total_balance.contains_key(&token_id) {
+            _total_balance = self.total_balance.get(&token_id).unwrap();
+        } else {
+            _total_balance = 0u128;
+        }
+
+        _total_balance
     }
 }
 
